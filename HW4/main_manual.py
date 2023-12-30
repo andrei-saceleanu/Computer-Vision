@@ -1,33 +1,12 @@
+import cv2
 import numpy as np
 import open3d as o3d
-import cv2
+
+from argparse import ArgumentParser
 from maps import *
+from yaml import safe_load
 
-
-np.random.seed(42)
-
-# configs for enhancing cloud and filtering from mesh afterwards
-# 200, 20, densities quantile 0.05
-# 100, 10, densities quantile 0.1
-
-# uvs = []
-# vertices = np.array(mesh.vertices)
-# triangles = np.array(mesh.triangles)
-
-# # for num_tr in range(triangles.shape[0]):
-# #     for i in range(3):
-# #         pt = vertices[triangles[num_tr, i]]
-# #         pt[1] *= (-1)
-# #         proj_pt = P @ np.array(pt.tolist()+[1]).reshape(4,1)
-# #         proj_pt /= proj_pt[2]
-# #         x, y = proj_pt[0], proj_pt[1]
-# #         uvs.append([1-x[0]/w,1-y[0]/h])
-
-# mesh.textures = [o3d.geometry.Image(img)]
-# mesh.triangle_uvs = o3d.utility.Vector2dVector(np.array(uvs,dtype=np.float64))
-# mesh.triangle_material_ids = o3d.utility.IntVector([0] * triangles.shape[0])       
-
-
+np.random.seed(42)       
 
 def find_3d_intersection(start_points, end_points):
 
@@ -42,7 +21,7 @@ def find_3d_intersection(start_points, end_points):
     return p.reshape(1, 3)[0]
 
 
-def get_system_mat(image_map, compute_error_stats=True, compute_separate_params=False):
+def get_system_mat(image_map, idx, compute_error_stats=True, compute_separate_params=False):
 
     mat = []
     for point_id, point_data in image_map.items():
@@ -65,47 +44,62 @@ def get_system_mat(image_map, compute_error_stats=True, compute_separate_params=
         errs.append(err)
         
     if compute_error_stats:
-        print(np.mean(errs))
+        print(f"\nImage {idx}")
+        print(f"{'2D projection errors':=^40}")
+        print(f"Mean: {np.mean(errs):.3f} px")
+        print(f"Median: {np.median(errs):.3f} px")
+        print(f"Std: {np.std(errs):.3f} px")
+        print(f"Min: {np.min(errs):.3f} px")
+        print(f"Max: {np.max(errs):.3f} px")
     
-
+    extras = None
     if compute_separate_params:
         p3x3 = np.array(P[:3,:3][::-1,:])
         qtilde, rtilde = np.linalg.qr(p3x3.T)
         q = qtilde.T[::-1,:]
         r = rtilde.T[::-1,:][:,::-1]
+        extras = (r, q)
     
     m_3x3 = P[:, :3]
     p4_3x1 = P[:, 3]
     m_inv_3x3 = np.linalg.inv(m_3x3)
     camera_center_3x1 = np.expand_dims(-m_inv_3x3 @ p4_3x1, 1)
     
+    return camera_center_3x1, m_inv_3x3, P, extras
 
-    return camera_center_3x1, m_inv_3x3, P
-
-def interpolate_new_points(pts, pool, pool2, pool3):
-    for _ in range(100):
-        a,b = np.random.choice(np.arange(len(pool)),2,replace=False)
-        for _ in range(10):
+def interpolate_from_pool(pts, pool, pair_cnt, uniform_cnt):
+    for _ in range(pair_cnt):
+        a,b = np.random.choice(np.arange(len(pool)), 2, replace=False)
+        for _ in range(uniform_cnt):
             t = np.random.rand()
         
-            pts = np.concatenate([pts,(t * np.array(pool[a]) + (1-t) * np.array(pool[b])).reshape(1,3)])
+            pts = np.concatenate([
+                pts,
+                (t * np.array(pool[a]) + (1-t) * np.array(pool[b])).reshape(1,3)
+            ])
 
-    for _ in range(100):
-        a,b = np.random.choice(np.arange(len(pool2)),2,replace=False)
-        for _ in range(10):
-            t = np.random.rand()
-        
-            pts = np.concatenate([pts,(t * np.array(pool2[a]) + (1-t) * np.array(pool2[b])).reshape(1,3)])
-
-
-    for _ in range(100):
-        a,b = np.random.choice(np.arange(len(pool3)),2,replace=False)
-        for _ in range(10):
-            t = np.random.rand()
-        
-            pts = np.concatenate([pts,(t * np.array(pool3[a]) + (1-t) * np.array(pool3[b])).reshape(1,3)])
     return pts
 
+def interpolate_new_points(pts, pool, pool2, pool3, config_data):
+
+    pair_cnt = config_data["pair_cnt"]
+    uniform_cnt = config_data["uniform_cnt"]
+    pts = interpolate_from_pool(pts, pool, pair_cnt, uniform_cnt)
+    pts = interpolate_from_pool(pts, pool2, pair_cnt, uniform_cnt)
+    pts = interpolate_from_pool(pts, pool3, pair_cnt, uniform_cnt)
+
+    if config_data["enable46"]:
+        for _ in range(pair_cnt):
+            a = np.random.choice(np.arange(len(pool2)-1),1)[0]
+            for _ in range(uniform_cnt):
+                t = np.random.rand()
+            
+                pts = np.concatenate([
+                    pts,
+                    (t * np.array(pool2[-1]) + (1-t) * np.array(pool2[a])).reshape(1,3)
+                ])
+
+    return pts
 
 def texture_mesh(P, pts, img, h, w):
     colors = []
@@ -118,10 +112,42 @@ def texture_mesh(P, pts, img, h, w):
         
     return colors
 
+def parse_args():
+
+    parser = ArgumentParser()
+    parser.add_argument(
+        "--config_file",
+        type=str,
+        required=False,
+        default="manual_config.yml"
+    )
+    parser.add_argument(
+        "--config_id",
+        type=str,
+        required=False,
+        default="no_46"
+    )
+    parser.add_argument(
+        "--enable_plot",
+        action="store_true",
+        required=False
+    )
+    parser.add_argument(
+        "--enable_mesh",
+        action="store_true",
+        required=False
+    )
+
+    return parser.parse_args()
+
 def main():
 
-    cc0, mat0, _ = get_system_mat(image0_map)
-    cc1, mat1, P = get_system_mat(image1_map)
+    args = parse_args()
+    with open(args.config_file, "r") as  fin:
+        config_data = safe_load(fin)["configs"][args.config_id]
+
+    cc0, mat0, _, _ = get_system_mat(image0_map,idx=0)
+    cc1, mat1, P, _ = get_system_mat(image1_map,idx=1)
 
 
     start_points = np.concatenate([cc0.T,cc1.T]) # camera centers in 3D world coordinates
@@ -134,7 +160,8 @@ def main():
 
     for point_id in image0_map_all:
         if point_id in image1_map_all:
-
+            if point_id == 46 and config_data["enable46"] == False:
+                continue
             curr_point0 = np.array(image0_map_all[point_id]["2d"] +[1]).reshape(3,1)
             curr_point1 = np.array(image1_map_all[point_id]["2d"] +[1]).reshape(3,1)
 
@@ -156,62 +183,70 @@ def main():
             pts.append(backproj_3d)
             if point_id < 24:
                 pool.append(backproj_3d)
-            elif 24 <= point_id < 46:
+            elif 24 <= point_id <= 46:
                 pool2.append(backproj_3d)
             else:
                 pool3.append(backproj_3d)
             
             err = np.linalg.norm(np.array(backproj_3d)-np.array(real_3d))
             errs.append(err)
-    print(np.mean(errs))
-
-    # reflection on Oy in order to match Open3D convention with our convention
-    refl_y = np.eye(4)
-    refl_y[1,1] = -1
-    geometry_list = []
-
-    # coordinate frame
-    org = np.array([0,0,0])
-    org_axis = o3d.geometry.TriangleMesh.create_coordinate_frame(origin=org)
-    org_axis = org_axis.transform(refl_y)
-    geometry_list.append(org_axis)
-
-
-    pts = np.array(pts)
-    pts = interpolate_new_points(pts, pool, pool2, pool3)
-    pts = (refl_y @ np.hstack((pts,np.ones((pts.shape[0],1)))).T).T[:,:3]
     
-    # add point cloud to list of geometries to be rendered
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(pts)
-    pcd.estimate_covariances()
-    pcd.estimate_normals()
-    pcd.orient_normals_consistent_tangent_plane(100)
-    geometry_list.append(pcd)
+    print(f"\n{'3D backprojection errors':=^40}")
+    print(f"Mean: {np.mean(errs):.3f} cm")
+    print(f"Median: {np.median(errs):.3f} cm")
+    print(f"Std: {np.std(errs):.3f} cm")
+    print(f"Min: {np.min(errs):.3f} cm")
+    print(f"Max: {np.max(errs):.3f} cm")
+
+    if args.enable_plot:
+        # reflection on Oy in order to match Open3D convention with our convention
+        refl_y = np.eye(4)
+        refl_y[1,1] = -1
+        geometry_list = []
+
+        # coordinate frame
+        org = np.array([0,0,0])
+        org_axis = o3d.geometry.TriangleMesh.create_coordinate_frame(origin=org)
+        org_axis = org_axis.transform(refl_y)
+        geometry_list.append(org_axis)
 
 
-    mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=9)
-    vertices_to_remove = densities < np.quantile(densities, 0.1)
-    mesh.remove_vertices_by_mask(vertices_to_remove)
-    mesh = mesh.subdivide_midpoint(number_of_iterations=3)
-    mesh.compute_vertex_normals()
-    print(mesh)
-    
-    # add mesh to geometries to be rendered, map texture to its vertices
-    pts = np.array(mesh.vertices)
-    img = cv2.cvtColor(cv2.imread("image1.jpg"),cv2.COLOR_BGR2RGB)
-    h, w, _ = img.shape
-    colors = texture_mesh(P, pts, img, h, w)
-    mesh.vertex_colors = o3d.utility.Vector3dVector(np.array(colors, dtype=np.float64))
-    geometry_list.append(mesh)
+        pts = np.array(pts)
+        if args.enable_mesh:
+            pts = interpolate_new_points(pts, pool, pool2, pool3, config_data)
+        pts = (refl_y @ np.hstack((pts,np.ones((pts.shape[0],1)))).T).T[:,:3]
+        
+        # add point cloud to list of geometries to be rendered
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(pts)
+        pcd.estimate_covariances()
+        pcd.estimate_normals()
+        pcd.orient_normals_consistent_tangent_plane(100)
+        geometry_list.append(pcd)
 
-    # plot results
-    o3d.visualization.draw_geometries(
-        geometry_list,
-        window_name="Backprojected 3D points and textured mesh",
-        mesh_show_back_face=False,
-        point_show_normal=False
-    )
+        if args.enable_mesh:
+            mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=9)
+            vertices_to_remove = densities < np.quantile(densities, config_data["quantile"])
+            mesh.remove_vertices_by_mask(vertices_to_remove)
+            mesh = mesh.subdivide_midpoint(number_of_iterations=3)
+            mesh.compute_vertex_normals()
+            print(mesh)
+            
+            # add mesh to geometries to be rendered, map texture to its vertices
+            pts = np.array(mesh.vertices)
+            img = cv2.cvtColor(cv2.imread("image1.jpg"),cv2.COLOR_BGR2RGB)
+            h, w, _ = img.shape
+            colors = texture_mesh(P, pts, img, h, w)
+            mesh.vertex_colors = o3d.utility.Vector3dVector(np.array(colors, dtype=np.float64))
+            geometry_list.append(mesh)
+
+        # plot results
+        o3d.visualization.draw_geometries(
+            geometry_list,
+            window_name="Backprojected 3D points and, optionally, textured mesh",
+            mesh_show_back_face=False,
+            point_show_normal=False
+        )
 
 if __name__ == "__main__":
     main()

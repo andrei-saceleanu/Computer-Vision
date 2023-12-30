@@ -1,0 +1,11 @@
+configs:
+  no_46:
+    pair_cnt: 100
+    uniform_cnt: 10
+    quantile: 0.1
+    enable46: False
+  all:
+    pair_cnt: 100
+    uniform_cnt: 10
+    quantile: 0.05
+    enable46: True
